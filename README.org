@@ -1,1 +1,62 @@
-* fling
+#+title: fling
+
+=fling= adds kinetic scrolling to Emacs on touch screens. Swipe and lift your finger, and the text keeps moving, then slows to a stop. It was written for the Android port of Emacs, where the screen otherwise stops dead when the finger lifts.
+
+Emacs's own kinetic scrolling in =pixel-scroll= was built for touchpads. On a phone it feels slow and floaty: it averages the whole gesture, slows down linearly for a fixed 1.75 seconds, and moves a fixed distance per timer tick that takes longer than intended when redisplay is slow.
+
+=fling= instead:
+
+- takes the release speed from the last tenth of a second, so a pause before lifting gives no fling;
+- slows down exponentially, so a hard flick travels further than a gentle one;
+- moves by speed times the real time since the last frame, so a slow frame never slows the motion;
+- stops on any input, and at either end of the buffer;
+- defers garbage collection until the fling ends, since a collection can pause a phone for a tenth of a second.
+
+* Install
+
+Requires Emacs 30.1 or newer. With Emacs's built-in VC package manager:
+
+#+begin_src elisp
+(package-vc-install "https://github.com/suderman/fling")
+#+end_src
+
+Alternatively, clone this repository and add its root to =load-path=. Then enable the mode:
+
+#+begin_src elisp
+(require 'fling)
+(fling-mode 1)
+#+end_src
+
+With =use-package=:
+
+#+begin_src elisp
+(use-package fling
+  :vc (:url "https://github.com/suderman/fling" :rev :newest)
+  :if (featurep 'android)
+  :config (fling-mode 1))
+#+end_src
+
+Pixel-precise touch scrolling makes the drag and the fling match:
+
+#+begin_src elisp
+(setq touch-screen-precision-scroll t)
+#+end_src
+
+* Options
+
+- =fling-time-constant= (default 0.35) is the number of seconds for a fling to lose about two thirds of its speed. A fling travels about its release speed times this value. Raise it for longer glides.
+- =fling-min-velocity= (default 300) is the release speed, in pixels per second, below which a swipe does not fling.
+
+=fling-scroll= scrolls a window at a given speed and can be called directly.
+
+* Compatibility and tests
+
+=touch-screen.el= has no public hook for touch scrolling. =fling-mode= advises its internal =touch-screen-handle-scroll= and =touch-screen-handle-touch=, and reads =touch-screen-current-tool=. Check compatibility when upgrading Emacs. Disabling the mode removes the advice.
+
+Run the standalone ERT suite from this repository:
+
+#+begin_src sh
+emacs --batch -L . -l test/fling-test.el -f ert-run-tests-batch-and-exit
+#+end_src
+
+The tests use a simulated clock and need no touch screen or personal configuration.
