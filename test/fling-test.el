@@ -110,6 +110,34 @@ Scrolls are summed into `down' and `up'."
       (fling--start '(touchscreen-end (7 . nil)))
       (should-not flung))))
 
+(ert-deftest fling-scroll-splits-steps-taller-than-the-window ()
+  (let ((calls nil))
+    (cl-letf (((symbol-function 'window-text-height) (lambda (&rest _) 1000))
+              ((symbol-function 'pixel-scroll-precision-scroll-down-page)
+               (lambda (pixels) (push pixels calls)))
+              ((symbol-function 'pixel-scroll-precision-scroll-up-page)
+               (lambda (pixels) (push (- pixels) calls))))
+      (fling--scroll-pixels 2500)
+      (should (equal (nreverse calls) '(999 999 502)))
+      (setq calls nil)
+      (fling--scroll-pixels -1200)
+      (should (equal (nreverse calls) '(-999 -201))))))
+
+(ert-deftest fling-hold-waits-for-queued-input ()
+  (let ((touch-screen-current-timer nil)
+        (held nil))
+    (unwind-protect
+        (let ((timeout (lambda (arg) (setq held arg))))
+          (cl-letf (((symbol-function 'input-pending-p) #'always))
+            (fling--hold timeout t))
+          (should-not held)
+          (should (timerp touch-screen-current-timer))
+          (cl-letf (((symbol-function 'input-pending-p) #'ignore))
+            (fling--hold timeout t))
+          (should held))
+      (when touch-screen-current-timer
+        (cancel-timer touch-screen-current-timer)))))
+
 (ert-deftest fling-scroll-notes-when-input-stops-it ()
   (with-temp-buffer
     (setq fling--caught-at nil)
@@ -161,10 +189,12 @@ Scrolls are summed into `down' and `up'."
         (should (advice-member-p #'fling--record 'touch-screen-handle-scroll))
         (should (advice-member-p #'fling--start 'touch-screen-handle-touch))
         (should (advice-member-p #'fling--catch 'touch-screen-handle-touch))
+        (should (advice-member-p #'fling--hold 'touch-screen-handle-timeout))
         (fling-mode -1)
         (should-not (advice-member-p #'fling--record 'touch-screen-handle-scroll))
         (should-not (advice-member-p #'fling--start 'touch-screen-handle-touch))
-        (should-not (advice-member-p #'fling--catch 'touch-screen-handle-touch)))
+        (should-not (advice-member-p #'fling--catch 'touch-screen-handle-touch))
+        (should-not (advice-member-p #'fling--hold 'touch-screen-handle-timeout)))
     (fling-mode -1)))
 
 (ert-deftest fling-touch-screen-internals-are-present ()
@@ -174,6 +204,8 @@ Scrolls are summed into `down' and `up'."
                  '(dx dy)))
   (should (eq (car (help-function-arglist 'touch-screen-handle-touch t))
               'event))
+  (should (equal (help-function-arglist 'touch-screen-handle-timeout t)
+                 '(arg)))
   (dolist (variable '(touch-screen-current-tool
                       touch-screen-current-timer
                       touch-screen-extend-selection))

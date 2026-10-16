@@ -19,11 +19,13 @@
 ;; the real time since the last frame, so a slow frame never slows the motion.
 ;; Any input stops the fling, as does reaching either end of the buffer.
 ;; A touch that stops a fling only scrolls: holding it, tapping, or
-;; dragging from the region never selects text or moves point.
+;; dragging from the region never selects text or moves point.  A long press
+;; also waits until Emacs has read any queued touch movement, so a stall
+;; cannot turn a swipe into a selection.
 ;; Garbage collection waits until the fling ends.
 ;;
-;; The mode advises `touch-screen-handle-scroll' and
-;; `touch-screen-handle-touch'.  These are internal to touch-screen.el, so
+;; The mode advises `touch-screen-handle-scroll', `touch-screen-handle-touch',
+;; and `touch-screen-handle-timeout'.  These are internal to touch-screen.el, so
 ;; check compatibility when upgrading Emacs.
 
 ;;; Code:
@@ -51,6 +53,9 @@ Larger values glide further."
 
 (defconst fling--stop-velocity 30
   "Speed in pixels per second at which a fling stops.")
+
+(defconst fling--hold-retry-seconds 0.05
+  "How long a long press waits for queued input before checking again.")
 
 (defconst fling--catch-seconds 0.2
   "How soon after input stops a fling a touch counts as catching it.")
@@ -84,6 +89,18 @@ A positive speed scrolls toward the end of the buffer."
            (- now (car (car (last samples)))))
       0)))
 
+(defun fling--scroll-pixels (pixels)
+  "Scroll the selected window by PIXELS, toward the end if positive.
+`pixel-scroll' cannot move a window's text height in one call, which a
+fast fling covers in one slow frame."
+  (let ((step (max 1 (1- (window-text-height nil t)))))
+    (while (/= pixels 0)
+      (let ((move (max (- step) (min step pixels))))
+        (if (> move 0)
+            (pixel-scroll-precision-scroll-down-page move)
+          (pixel-scroll-precision-scroll-up-page (- move)))
+        (setq pixels (- pixels move))))))
+
 (defun fling-scroll (window velocity)
   "Keep scrolling WINDOW at VELOCITY pixels per second, slowing with friction.
 A positive VELOCITY scrolls toward the end of the buffer.  Any input stops
@@ -104,10 +121,7 @@ the fling."
               (setq last now
                     carry (- distance pixels)
                     velocity (* velocity (exp (- (/ dt fling-time-constant)))))
-              (cond ((> pixels 0)
-                     (pixel-scroll-precision-scroll-down-page pixels))
-                    ((< pixels 0)
-                     (pixel-scroll-precision-scroll-up-page (- pixels))))))
+              (fling--scroll-pixels pixels)))
         ((beginning-of-buffer end-of-buffer) nil)))
     (when (input-pending-p)
       (setq fling--caught-at (float-time)))))
@@ -142,6 +156,16 @@ nothing when it lifts without moving."
             (setq touch-screen-current-timer nil))))
     (apply touch event args)))
 
+(defun fling--hold (timeout arg)
+  "Call TIMEOUT with ARG once no input is waiting to be read.
+After a stall, the long-press timer can fire before Emacs reads touch
+movement that is already queued, turning a swipe into a selection."
+  (if (and arg (input-pending-p))
+      (setq touch-screen-current-timer
+            (run-at-time fling--hold-retry-seconds nil
+                         #'touch-screen-handle-timeout t))
+    (funcall timeout arg)))
+
 ;;;###autoload
 (define-minor-mode fling-mode
   "Continue touch-screen scrolling after a swipe is released."
@@ -151,10 +175,12 @@ nothing when it lifts without moving."
       (progn
         (advice-add 'touch-screen-handle-scroll :before #'fling--record)
         (advice-add 'touch-screen-handle-touch :before #'fling--start)
-        (advice-add 'touch-screen-handle-touch :around #'fling--catch))
+        (advice-add 'touch-screen-handle-touch :around #'fling--catch)
+        (advice-add 'touch-screen-handle-timeout :around #'fling--hold))
     (advice-remove 'touch-screen-handle-scroll #'fling--record)
     (advice-remove 'touch-screen-handle-touch #'fling--start)
     (advice-remove 'touch-screen-handle-touch #'fling--catch)
+    (advice-remove 'touch-screen-handle-timeout #'fling--hold)
     (setq fling--samples nil
           fling--caught-at nil)))
 
