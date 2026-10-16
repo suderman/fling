@@ -110,15 +110,61 @@ Scrolls are summed into `down' and `up'."
       (fling--start '(touchscreen-end (7 . nil)))
       (should-not flung))))
 
+(ert-deftest fling-scroll-notes-when-input-stops-it ()
+  (with-temp-buffer
+    (setq fling--caught-at nil)
+    (fling-test--with-clock 1000
+      (fling-scroll (selected-window) 3000))
+    (should-not fling--caught-at)
+    (cl-letf (((symbol-function 'input-pending-p) #'always))
+      (fling-test--with-clock 3
+        (fling-scroll (selected-window) 3000)))
+    (should fling--caught-at)))
+
+(ert-deftest fling-catch-turns-a-touch-that-stops-a-fling-into-a-scroll ()
+  (let* ((touch-screen-current-tool nil)
+         (touch-screen-current-timer nil)
+         (extend nil)
+         (begin (lambda (_event)
+                  (setq extend touch-screen-extend-selection
+                        touch-screen-current-tool
+                        (list 7 (selected-window) '(0 . 0) nil)
+                        touch-screen-current-timer
+                        (run-at-time 60 nil #'ignore)))))
+    (unwind-protect
+        (let ((touch-screen-extend-selection t))
+          ;; An ordinary touch keeps its long press and region drag.
+          (setq fling--caught-at nil)
+          (fling--catch begin '(touchscreen-begin (7 . nil)))
+          (should extend)
+          (should touch-screen-current-timer)
+          (should-not (nth 3 touch-screen-current-tool))
+          (cancel-timer touch-screen-current-timer)
+          ;; A touch right after a fling stopped only scrolls.
+          (setq fling--caught-at (float-time))
+          (fling--catch begin '(touchscreen-begin (7 . nil)))
+          (should-not extend)
+          (should-not touch-screen-current-timer)
+          (should (eq (nth 3 touch-screen-current-tool) 'scroll))
+          (should-not fling--caught-at)
+          ;; A later touch is ordinary again.
+          (setq fling--caught-at (- (float-time) 1))
+          (fling--catch begin '(touchscreen-begin (7 . nil)))
+          (should touch-screen-current-timer))
+      (when touch-screen-current-timer
+        (cancel-timer touch-screen-current-timer)))))
+
 (ert-deftest fling-mode-adds-and-removes-its-advice ()
   (unwind-protect
       (progn
         (fling-mode 1)
         (should (advice-member-p #'fling--record 'touch-screen-handle-scroll))
         (should (advice-member-p #'fling--start 'touch-screen-handle-touch))
+        (should (advice-member-p #'fling--catch 'touch-screen-handle-touch))
         (fling-mode -1)
         (should-not (advice-member-p #'fling--record 'touch-screen-handle-scroll))
-        (should-not (advice-member-p #'fling--start 'touch-screen-handle-touch)))
+        (should-not (advice-member-p #'fling--start 'touch-screen-handle-touch))
+        (should-not (advice-member-p #'fling--catch 'touch-screen-handle-touch)))
     (fling-mode -1)))
 
 (ert-deftest fling-touch-screen-internals-are-present ()
@@ -128,7 +174,10 @@ Scrolls are summed into `down' and `up'."
                  '(dx dy)))
   (should (eq (car (help-function-arglist 'touch-screen-handle-touch t))
               'event))
-  (should (boundp 'touch-screen-current-tool))
+  (dolist (variable '(touch-screen-current-tool
+                      touch-screen-current-timer
+                      touch-screen-extend-selection))
+    (should (boundp variable)))
   (dolist (function '(pixel-scroll-precision-scroll-down-page
                       pixel-scroll-precision-scroll-up-page))
     (should (fboundp function))))

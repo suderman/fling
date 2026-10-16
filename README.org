@@ -10,6 +10,7 @@ Emacs's own kinetic scrolling in =pixel-scroll= was built for touchpads. On a ph
 - slows down exponentially, so a hard flick travels further than a gentle one;
 - moves by speed times the real time since the last frame, so a slow frame never slows the motion;
 - stops on any input, and at either end of the buffer;
+- treats a touch that stops a fling as a scroll, so catching the text never selects a word, drags the region, or moves point;
 - defers garbage collection until the fling ends, since a collection can pause a phone for a tenth of a second.
 
 * Install
@@ -51,7 +52,7 @@ Pixel-precise touch scrolling makes the drag and the fling match:
 
 * Compatibility and tests
 
-=touch-screen.el= has no public hook for touch scrolling. =fling-mode= advises its internal =touch-screen-handle-scroll= and =touch-screen-handle-touch=, and reads =touch-screen-current-tool=. Check compatibility when upgrading Emacs. Disabling the mode removes the advice.
+=touch-screen.el= has no public hook for touch scrolling. =fling-mode= advises its internal =touch-screen-handle-scroll= and =touch-screen-handle-touch=, and reads and adjusts =touch-screen-current-tool= and =touch-screen-current-timer=. Check compatibility when upgrading Emacs. Disabling the mode removes the advice.
 
 Run the standalone ERT suite from this repository:
 

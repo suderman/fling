@@ -18,6 +18,8 @@
 ;; fling.  The speed decays exponentially, and each step moves by speed times
 ;; the real time since the last frame, so a slow frame never slows the motion.
 ;; Any input stops the fling, as does reaching either end of the buffer.
+;; A touch that stops a fling only scrolls: holding it, tapping, or
+;; dragging from the region never selects text or moves point.
 ;; Garbage collection waits until the fling ends.
 ;;
 ;; The mode advises `touch-screen-handle-scroll' and
@@ -49,6 +51,12 @@ Larger values glide further."
 
 (defconst fling--stop-velocity 30
   "Speed in pixels per second at which a fling stops.")
+
+(defconst fling--catch-seconds 0.2
+  "How soon after input stops a fling a touch counts as catching it.")
+
+(defvar fling--caught-at nil
+  "When input last stopped a fling, as a float time.")
 
 (defvar fling--samples nil
   "Recent vertical touch-scroll movements as (TIME . DY), newest first.")
@@ -100,7 +108,9 @@ the fling."
                      (pixel-scroll-precision-scroll-down-page pixels))
                     ((< pixels 0)
                      (pixel-scroll-precision-scroll-up-page (- pixels))))))
-        ((beginning-of-buffer end-of-buffer) nil)))))
+        ((beginning-of-buffer end-of-buffer) nil)))
+    (when (input-pending-p)
+      (setq fling--caught-at (float-time)))))
 
 (defun fling--start (event &rest _)
   "Fling after touch-scroll EVENT ends at speed."
@@ -113,6 +123,25 @@ the fling."
       (when (> (abs velocity) fling-min-velocity)
         (fling-scroll (cadr touch-screen-current-tool) velocity)))))
 
+(defun fling--catch (touch event &rest args)
+  "Call TOUCH with EVENT and ARGS, making a touch that stops a fling a scroll.
+Such a touch gets no long press, cannot drag the region, and does
+nothing when it lifts without moving."
+  (if (and (eq (car event) 'touchscreen-begin)
+           fling--caught-at
+           (< (- (float-time) fling--caught-at) fling--catch-seconds))
+      (progn
+        (setq fling--caught-at nil)
+        (let ((touch-screen-extend-selection nil))
+          (apply touch event args))
+        (when (and touch-screen-current-tool
+                   (null (nth 3 touch-screen-current-tool)))
+          (setcar (nthcdr 3 touch-screen-current-tool) 'scroll)
+          (when touch-screen-current-timer
+            (cancel-timer touch-screen-current-timer)
+            (setq touch-screen-current-timer nil))))
+    (apply touch event args)))
+
 ;;;###autoload
 (define-minor-mode fling-mode
   "Continue touch-screen scrolling after a swipe is released."
@@ -121,10 +150,13 @@ the fling."
   (if fling-mode
       (progn
         (advice-add 'touch-screen-handle-scroll :before #'fling--record)
-        (advice-add 'touch-screen-handle-touch :before #'fling--start))
+        (advice-add 'touch-screen-handle-touch :before #'fling--start)
+        (advice-add 'touch-screen-handle-touch :around #'fling--catch))
     (advice-remove 'touch-screen-handle-scroll #'fling--record)
     (advice-remove 'touch-screen-handle-touch #'fling--start)
-    (setq fling--samples nil)))
+    (advice-remove 'touch-screen-handle-touch #'fling--catch)
+    (setq fling--samples nil
+          fling--caught-at nil)))
 
 (provide 'fling)
 ;;; fling.el ends here
