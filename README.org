@@ -8,6 +8,9 @@ Emacs's own kinetic scrolling in =pixel-scroll= was built for touchpads. On a ph
 
 - takes the release speed from the last tenth of a second, so a pause before lifting gives no fling;
 - slows down exponentially, so a hard flick travels further than a gentle one;
+- glides sideways too when the swipe scrolled the window sideways, so a diagonal swipe glides diagonally, stopping at the start of lines or the end of the widest visible line;
+- scrolls sideways by pixels rather than whole columns wherever touch scrolls sideways, by scrolling one column too far and pushing the text back with a blank =line-prefix= narrower than a column;
+- scrolls vertically line by line in a window scrolled sideways, where =pixel-scroll= picks the wrong window start and can jump to the end of the buffer;
 - moves by speed times the real time since the last frame, so a slow frame never slows the motion;
 - stops on any input, and at either end of the buffer;
 - treats a touch that stops a fling as a scroll, so catching the text never selects a word, drags the region, or moves point;
@@ -53,7 +56,9 @@ Pixel-precise touch scrolling makes the drag and the fling match:
 
 * Compatibility and tests
 
-=touch-screen.el= has no public hook for touch scrolling. =fling-mode= advises its internal =touch-screen-handle-scroll=, =touch-screen-handle-touch=, and =touch-screen-handle-timeout=, and reads and adjusts =touch-screen-current-tool= and =touch-screen-current-timer=. Check compatibility when upgrading Emacs. Disabling the mode removes the advice.
+While a window rests between columns, the blank prefix replaces any =line-prefix= text property, and a sliver up to one column wide at the left edge shows blank instead of part of a character.
+
+=touch-screen.el= has no public hook for touch scrolling. =fling-mode= advises its internal =touch-screen-handle-scroll=, =touch-screen-handle-touch=, and =touch-screen-handle-timeout=, as well as =pixel-scroll-precision-scroll-down-page= and =pixel-scroll-precision-scroll-up-page=, and reads and adjusts =touch-screen-current-tool= and =touch-screen-current-timer=. Check compatibility when upgrading Emacs. Disabling the mode removes the advice.
 
 Run the standalone ERT suite from this repository:
 

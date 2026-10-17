@@ -15,8 +15,18 @@
 ;;
 ;; `fling-mode' continues a released swipe instead.  The release speed comes
 ;; from the last tenth of a second only, so a pause before lifting does not
-;; fling.  The speed decays exponentially, and each step moves by speed times
-;; the real time since the last frame, so a slow frame never slows the motion.
+;; fling.  A swipe that also scrolled the window sideways flings sideways
+;; too, so a diagonal swipe glides diagonally.  The speed decays
+;; exponentially, and each step moves by speed times the real time since the
+;; last frame, so a slow frame never slows the motion.
+;;
+;; Emacs scrolls a window sideways only by whole columns.  Where touch
+;; scrolls sideways, swipes and flings move by pixels instead: the window
+;; scrolls one column too far and a blank `line-prefix' less than a column
+;; wide pushes the text back.  The prefix overrides any `line-prefix' text
+;; property while the offset is not a whole column.  `pixel-scroll' cannot
+;; scroll vertically in a window scrolled sideways, so there the mode
+;; scrolls line by line itself.
 ;; Any input stops the fling, as does reaching either end of the buffer.
 ;; A touch that stops a fling only scrolls: holding it, tapping, or
 ;; dragging from the region never selects text or moves point.  A long press
@@ -25,8 +35,8 @@
 ;; Garbage collection waits until the fling ends.
 ;;
 ;; The mode advises `touch-screen-handle-scroll', `touch-screen-handle-touch',
-;; and `touch-screen-handle-timeout'.  These are internal to touch-screen.el, so
-;; check compatibility when upgrading Emacs.
+;; and `touch-screen-handle-timeout', internal to touch-screen.el, and the
+;; `pixel-scroll' page functions.  Check compatibility when upgrading Emacs.
 
 ;;; Code:
 
@@ -64,7 +74,10 @@ Larger values glide further."
   "When input last stopped a fling, as a float time.")
 
 (defvar fling--samples nil
-  "Recent vertical touch-scroll movements as (TIME . DY), newest first.")
+  "Recent touch-scroll movements as (TIME DX . DY), newest first.")
+
+(defvar fling--hscroll-start nil
+  "The window and its sideways offset in pixels when the current swipe began.")
 
 (defun fling--recent-samples (now)
   "Return the touch samples recorded within the sample window before NOW."
@@ -72,20 +85,25 @@ Larger values glide further."
                     (< (- now (car sample)) fling--sample-seconds))
                   fling--samples))
 
-(defun fling--record (_dx dy &optional now)
-  "Record vertical touch movement DY at NOW, defaulting to the current time."
+(defun fling--record (dx dy &optional now)
+  "Record touch movement DX and DY at NOW, defaulting to the current time."
   (let ((now (or now (float-time))))
-    (push (cons now dy) fling--samples)
+    (unless fling--hscroll-start
+      (setq fling--hscroll-start
+            (cons (selected-window) (fling--hscroll-offset))))
+    (push (cons now (cons dx dy)) fling--samples)
     (setq fling--samples (fling--recent-samples now))))
 
-(defun fling--velocity (&optional now)
-  "Return the vertical swipe speed at NOW in pixels per second.
-A positive speed scrolls toward the end of the buffer."
+(defun fling--velocity (&optional now horizontal)
+  "Return the swipe speed at NOW in pixels per second.
+Return the vertical speed, positive toward the end of the buffer, or with
+HORIZONTAL the sideways speed, positive toward the ends of lines."
   (let* ((now (or now (float-time)))
-         (samples (fling--recent-samples now)))
+         (samples (fling--recent-samples now))
+         (axis (if horizontal #'cadr #'cddr)))
     (if (cdr samples)
         ;; The oldest sample's movement happened before its own timestamp.
-        (/ (apply #'+ (mapcar #'cdr (butlast samples)))
+        (/ (apply #'+ (mapcar axis (butlast samples)))
            (- now (car (car (last samples)))))
       0)))
 
@@ -101,41 +119,184 @@ fast fling covers in one slow frame."
           (pixel-scroll-precision-scroll-up-page (- move)))
         (setq pixels (- pixels move))))))
 
-(defun fling-scroll (window velocity)
+(defun fling--hscroll-limit ()
+  "Return the horizontal scroll that brings the widest visible line's end
+to the right edge of the selected window."
+  (let ((width 0)
+        (end (window-end)))
+    (save-excursion
+      (goto-char (window-start))
+      (while (< (point) end)
+        (end-of-line)
+        (setq width (max width (current-column)))
+        (forward-line)))
+    (max 0 (- width (window-max-chars-per-line) -1))))
+
+(defun fling--vscroll-hscrolled (scroll pixels delta)
+  "Call SCROLL with PIXELS, or scroll DELTA here in a window scrolled sideways.
+SCROLL is `pixel-scroll-precision-scroll-down-page' or its upward twin,
+which find the new window start at the left edge: mid-line, or a fling's
+blank prefix, once the window scrolls sideways.  There, move the start by
+whole lines and keep the remainder as vertical scroll.  A positive DELTA
+scrolls toward the end of the buffer."
+  (if (zerop (window-hscroll))
+      (funcall scroll pixels)
+    (let ((vscroll (+ (window-vscroll nil t) delta))
+          (edge nil)
+          start)
+      (save-excursion
+        (goto-char (window-start))
+        (vertical-motion 0)
+        (while (and (not edge) (< vscroll 0))
+          (if (zerop (vertical-motion -1))
+              (setq vscroll 0 edge 'beginning-of-buffer)
+            (setq vscroll (+ vscroll (line-pixel-height)))))
+        (while (and (not edge) (>= vscroll (line-pixel-height)))
+          (let ((height (line-pixel-height)))
+            (if (/= (vertical-motion 1) 1)
+                (progn (vertical-motion 0)
+                       (setq vscroll 0 edge 'end-of-buffer))
+              (setq vscroll (- vscroll height)))))
+        (setq start (point)))
+      (let ((auto-window-vscroll nil))
+        (set-window-start nil start (not (zerop vscroll)))
+        (set-window-vscroll nil vscroll t t))
+      ;; Keep point on screen so redisplay does not recenter.
+      (cond ((< (point) start)
+             (goto-char start)
+             (unless (zerop vscroll) (vertical-motion 1)))
+            ((not (pos-visible-in-window-p (point)))
+             (goto-char start)
+             (vertical-motion (max 0 (- (floor (window-text-height nil t)
+                                               (default-line-height))
+                                        2)))))
+      (when edge (signal edge nil)))))
+
+(defun fling--vscroll-down (scroll pixels)
+  "Call SCROLL down PIXELS, by lines in a window scrolled sideways."
+  (fling--vscroll-hscrolled scroll pixels pixels))
+
+(defun fling--vscroll-up (scroll pixels)
+  "Call SCROLL up PIXELS, by lines in a window scrolled sideways."
+  (fling--vscroll-hscrolled scroll pixels (- pixels)))
+
+(defun fling--hscroll-offset (&optional window)
+  "Return how far WINDOW is scrolled sideways, in pixels.
+The window's `fling--hscroll' parameter holds (HSCROLL PREFIX . OVERLAY)
+while a prefix PREFIX pixels wide shifts its text back from column HSCROLL;
+it counts only while the window is still at that column."
+  (let* ((window (window-normalize-window window t))
+         (hscroll (window-hscroll window))
+         (state (window-parameter window 'fling--hscroll)))
+    (- (* hscroll (frame-char-width (window-frame window)))
+       (if (eql (car state) hscroll) (cadr state) 0))))
+
+(defun fling--hscroll-pixels (pixels)
+  "Scroll the selected window PIXELS sideways, toward line ends if positive.
+Return nil once the window reaches the start of lines or the end of the
+widest visible line."
+  (let* ((width (frame-char-width))
+         (offset (fling--hscroll-offset))
+         (limit (max offset (* width (fling--hscroll-limit))))
+         (target (max 0 (min limit (+ offset pixels))))
+         (hscroll (ceiling target width))
+         (prefix (- (* hscroll width) target))
+         (overlay (cddr (window-parameter nil 'fling--hscroll))))
+    (set-window-hscroll nil hscroll)
+    (if (zerop prefix)
+        (progn
+          (when overlay (delete-overlay overlay))
+          (set-window-parameter nil 'fling--hscroll nil))
+      (unless (and overlay (eq (overlay-buffer overlay) (current-buffer)))
+        (when overlay (delete-overlay overlay))
+        (setq overlay (make-overlay (point-min) (point-max) nil nil t))
+        (overlay-put overlay 'window (selected-window)))
+      ;; A rebuilt buffer can shrink the overlay.
+      (move-overlay overlay (point-min) (point-max))
+      (overlay-put overlay 'line-prefix `(space :width (,prefix)))
+      (set-window-parameter nil 'fling--hscroll
+                            (cons hscroll (cons prefix overlay))))
+    (= target (+ offset pixels))))
+
+(defun fling--drag (scroll dx dy)
+  "Call SCROLL with DX and DY, scrolling sideways by pixels where enabled.
+SCROLL is `touch-screen-handle-scroll', which still counts the sideways
+movement and decides whether a swipe that scrolled vertically may also
+scroll sideways."
+  (if (not touch-screen-enable-hscroll)
+      (funcall scroll dx dy)
+    (let ((touch-screen-enable-hscroll nil))
+      (funcall scroll dx dy))
+    (when (or (> (or (nth 8 touch-screen-current-tool) 0) 0)
+              (< (or (nth 7 touch-screen-current-tool) 0) 1))
+      (fling--hscroll-pixels dx))))
+
+(defun fling-scroll (window velocity &optional hvelocity)
   "Keep scrolling WINDOW at VELOCITY pixels per second, slowing with friction.
-A positive VELOCITY scrolls toward the end of the buffer.  Any input stops
-the fling."
+A positive VELOCITY scrolls toward the end of the buffer.  HVELOCITY scrolls
+sideways at the same time, positive toward the ends of lines.  Any input
+stops the fling."
   (let ((last (float-time))
         (carry 0.0)
+        (hvelocity (or hvelocity 0))
+        (hcarry 0.0)
         ;; A collection can take a tenth of a second on a phone, long enough
         ;; to make the fling jump.  Defer it until the fling stops.
         (gc-cons-threshold most-positive-fixnum))
     (with-selected-window window
       (condition-case nil
-          (while (and (> (abs velocity) fling--stop-velocity)
+          (while (and (> (sqrt (+ (* velocity velocity)
+                                  (* hvelocity hvelocity)))
+                         fling--stop-velocity)
                       (sit-for 0.001))
             (let* ((now (float-time))
                    (dt (- now last))
+                   (decay (exp (- (/ dt fling-time-constant))))
                    (distance (+ carry (* velocity dt)))
-                   (pixels (truncate distance)))
+                   (pixels (truncate distance))
+                   (hdistance (+ hcarry (* hvelocity dt)))
+                   (hpixels (truncate hdistance)))
               (setq last now
                     carry (- distance pixels)
-                    velocity (* velocity (exp (- (/ dt fling-time-constant)))))
+                    hcarry (- hdistance hpixels)
+                    velocity (* velocity decay)
+                    hvelocity (* hvelocity decay))
+              (when (and (/= hpixels 0)
+                         (not (fling--hscroll-pixels hpixels)))
+                (setq hvelocity 0))
               (fling--scroll-pixels pixels)))
-        ((beginning-of-buffer end-of-buffer) nil)))
+        ;; A diagonal fling keeps going sideways at either end of the buffer.
+        ((beginning-of-buffer end-of-buffer)
+         (unless (zerop hvelocity)
+           (fling-scroll window 0 (* hvelocity
+                                     (exp (- (/ (- (float-time) last)
+                                                fling-time-constant)))))))))
     (when (input-pending-p)
       (setq fling--caught-at (float-time)))))
 
 (defun fling--start (event &rest _)
-  "Fling after touch-scroll EVENT ends at speed."
+  "Fling after touch-scroll EVENT ends at speed.
+Fling sideways only when the swipe scrolled the window sideways, since
+touch-screen.el may have ignored the swipe's horizontal movement."
+  (when (eq (car event) 'touchscreen-begin)
+    (setq fling--hscroll-start nil))
   (when (and (eq (car event) 'touchscreen-end)
              (eq (caadr event) (car touch-screen-current-tool))
              (eq (nth 3 touch-screen-current-tool) 'scroll)
              (not (caddr event)))
-    (let ((velocity (fling--velocity)))
-      (setq fling--samples nil)
-      (when (> (abs velocity) fling-min-velocity)
-        (fling-scroll (cadr touch-screen-current-tool) velocity)))))
+    (let* ((window (cadr touch-screen-current-tool))
+           (velocity (fling--velocity))
+           (hvelocity (if (and (eq (car fling--hscroll-start) window)
+                               (window-live-p window)
+                               (/= (fling--hscroll-offset window)
+                                   (cdr fling--hscroll-start)))
+                          (fling--velocity nil t)
+                        0)))
+      (setq fling--samples nil
+            fling--hscroll-start nil)
+      (when (> (sqrt (+ (* velocity velocity) (* hvelocity hvelocity)))
+               fling-min-velocity)
+        (fling-scroll window velocity hvelocity)))))
 
 (defun fling--catch (touch event &rest args)
   "Call TOUCH with EVENT and ARGS, making a touch that stops a fling a scroll.
@@ -174,14 +335,28 @@ movement that is already queued, turning a swipe into a selection."
   (if fling-mode
       (progn
         (advice-add 'touch-screen-handle-scroll :before #'fling--record)
+        ;; Innermost, to see `touch-screen-enable-hscroll' as other advice
+        ;; binds it.
+        (advice-add 'touch-screen-handle-scroll :around #'fling--drag
+                    '((depth . 100)))
+        (advice-add 'pixel-scroll-precision-scroll-down-page :around
+                    #'fling--vscroll-down)
+        (advice-add 'pixel-scroll-precision-scroll-up-page :around
+                    #'fling--vscroll-up)
         (advice-add 'touch-screen-handle-touch :before #'fling--start)
         (advice-add 'touch-screen-handle-touch :around #'fling--catch)
         (advice-add 'touch-screen-handle-timeout :around #'fling--hold))
     (advice-remove 'touch-screen-handle-scroll #'fling--record)
+    (advice-remove 'touch-screen-handle-scroll #'fling--drag)
+    (advice-remove 'pixel-scroll-precision-scroll-down-page
+                   #'fling--vscroll-down)
+    (advice-remove 'pixel-scroll-precision-scroll-up-page
+                   #'fling--vscroll-up)
     (advice-remove 'touch-screen-handle-touch #'fling--start)
     (advice-remove 'touch-screen-handle-touch #'fling--catch)
     (advice-remove 'touch-screen-handle-timeout #'fling--hold)
     (setq fling--samples nil
+          fling--hscroll-start nil
           fling--caught-at nil)))
 
 (provide 'fling)
