@@ -220,6 +220,16 @@ widest visible line."
                                (cons hscroll (cons prefix (cons tick overlays)))))
     (= target (+ offset pixels))))
 
+(defun fling--drop-stale-prefix (window)
+  "Remove WINDOW's prefix overlays once something else scrolls it sideways.
+Other commands move whole columns and know nothing of the prefix."
+  (when-let* ((state (window-parameter window 'fling--hscroll))
+              ((or (not (eql (car state) (window-hscroll window)))
+                   (not (eq (overlay-buffer (nth 3 state))
+                            (window-buffer window))))))
+    (mapc #'delete-overlay (cdddr state))
+    (set-window-parameter window 'fling--hscroll nil)))
+
 (defun fling--prefix-overlays ()
   "Return overlays to shift the current buffer's lines in the selected window.
 The first covers the buffer; each later one covers a run of a
@@ -382,6 +392,7 @@ movement that is already queued, turning a swipe into a selection."
         ;; binds it.
         (advice-add 'touch-screen-handle-scroll :around #'fling--drag
                     '((depth . 100)))
+        (add-hook 'pre-redisplay-functions #'fling--drop-stale-prefix)
         (advice-add 'pixel-scroll-precision-scroll-down-page :around
                     #'fling--vscroll-down)
         (advice-add 'pixel-scroll-precision-scroll-up-page :around
@@ -391,6 +402,7 @@ movement that is already queued, turning a swipe into a selection."
         (advice-add 'touch-screen-handle-timeout :around #'fling--hold))
     (advice-remove 'touch-screen-handle-scroll #'fling--record)
     (advice-remove 'touch-screen-handle-scroll #'fling--drag)
+    (remove-hook 'pre-redisplay-functions #'fling--drop-stale-prefix)
     (advice-remove 'pixel-scroll-precision-scroll-down-page
                    #'fling--vscroll-down)
     (advice-remove 'pixel-scroll-precision-scroll-up-page
