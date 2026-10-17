@@ -23,8 +23,8 @@
 ;; Emacs scrolls a window sideways only by whole columns.  Where touch
 ;; scrolls sideways, swipes and flings move by pixels instead: the window
 ;; scrolls one column too far and a blank `line-prefix' less than a column
-;; wide pushes the text back.  The prefix overrides any `line-prefix' text
-;; property while the offset is not a whole column.  `pixel-scroll' cannot
+;; wide pushes the text back.  Lines with their own `line-prefix' text
+;; property get a shifted copy of it, so centered text stays centered.  `pixel-scroll' cannot
 ;; scroll vertically in a window scrolled sideways, so there the mode
 ;; scrolls line by line itself.
 ;; Any input stops the fling, as does reaching either end of the buffer.
@@ -182,8 +182,9 @@ scrolls toward the end of the buffer."
 
 (defun fling--hscroll-offset (&optional window)
   "Return how far WINDOW is scrolled sideways, in pixels.
-The window's `fling--hscroll' parameter holds (HSCROLL PREFIX . OVERLAY)
-while a prefix PREFIX pixels wide shifts its text back from column HSCROLL;
+The window's `fling--hscroll' parameter holds (HSCROLL PREFIX TICK .
+OVERLAYS) while overlays shift its text PREFIX pixels back from column
+HSCROLL, made when the buffer's character tick was TICK;
 it counts only while the window is still at that column."
   (let* ((window (window-normalize-window window t))
          (hscroll (window-hscroll window))
@@ -201,22 +202,64 @@ widest visible line."
          (target (max 0 (min limit (+ offset pixels))))
          (hscroll (ceiling target width))
          (prefix (- (* hscroll width) target))
-         (overlay (cddr (window-parameter nil 'fling--hscroll))))
+         (state (window-parameter nil 'fling--hscroll))
+         (tick (buffer-chars-modified-tick))
+         (overlays (cdddr state)))
     (set-window-hscroll nil hscroll)
-    (if (zerop prefix)
-        (progn
-          (when overlay (delete-overlay overlay))
-          (set-window-parameter nil 'fling--hscroll nil))
-      (unless (and overlay (eq (overlay-buffer overlay) (current-buffer)))
-        (when overlay (delete-overlay overlay))
-        (setq overlay (make-overlay (point-min) (point-max) nil nil t))
-        (overlay-put overlay 'window (selected-window)))
-      ;; A rebuilt buffer can shrink the overlay.
-      (move-overlay overlay (point-min) (point-max))
-      (overlay-put overlay 'line-prefix `(space :width (,prefix)))
-      (set-window-parameter nil 'fling--hscroll
-                            (cons hscroll (cons prefix overlay))))
+    (unless (and (not (zerop prefix))
+                 (eql (nth 2 state) tick)
+                 (eq (overlay-buffer (car overlays)) (current-buffer)))
+      (mapc #'delete-overlay overlays)
+      (setq overlays (unless (zerop prefix) (fling--prefix-overlays))))
+    (dolist (overlay overlays)
+      (overlay-put overlay 'line-prefix
+                   (fling--shift-prefix (overlay-get overlay 'fling--prefix)
+                                        prefix)))
+    (set-window-parameter nil 'fling--hscroll
+                          (and overlays
+                               (cons hscroll (cons prefix (cons tick overlays)))))
     (= target (+ offset pixels))))
+
+(defun fling--prefix-overlays ()
+  "Return overlays to shift the current buffer's lines in the selected window.
+The first covers the buffer; each later one covers a run of a
+`line-prefix' text property, keeping its value as `fling--prefix'."
+  (let ((overlays nil)
+        (pos (point-min)))
+    (while (setq pos (text-property-not-all pos (point-max) 'line-prefix nil))
+      (let ((next (next-single-property-change pos 'line-prefix nil
+                                               (point-max)))
+            (overlay nil))
+        (setq overlay (make-overlay pos next))
+        (overlay-put overlay 'fling--prefix (get-text-property pos 'line-prefix))
+        (overlay-put overlay 'priority 1)
+        (push overlay overlays)
+        (setq pos next)))
+    (push (make-overlay (point-min) (point-max) nil nil t) overlays)
+    (dolist (overlay overlays overlays)
+      (overlay-put overlay 'window (selected-window)))))
+
+(defun fling--shift-prefix (prefix pixels)
+  "Return line prefix PREFIX with its text pushed PIXELS right.
+Space before an `:align-to' stretch does not move what follows it, so
+move the stretch's target instead."
+  (let* ((string (if (stringp prefix) prefix (propertize " " 'display prefix)))
+         (spec (and prefix (get-text-property 0 'display string))))
+    (cond
+     ((null prefix) `(space :width (,pixels)))
+     ((and (eq (car-safe spec) 'space) (plist-get (cdr spec) :align-to))
+      (let ((shifted (copy-sequence string))
+            (end (next-single-property-change 0 'display string
+                                              (length string))))
+        (put-text-property
+         0 end 'display
+         `(space ,@(plist-put (copy-sequence (cdr spec)) :align-to
+                              `(+ ,(plist-get (cdr spec) :align-to)
+                                  (,pixels))))
+         shifted)
+        shifted))
+     (t (concat (propertize " " 'display `(space :width (,pixels)))
+                string)))))
 
 (defun fling--drag (scroll dx dy)
   "Call SCROLL with DX and DY, scrolling sideways by pixels where enabled.

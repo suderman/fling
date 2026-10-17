@@ -56,7 +56,7 @@ Pixel-precise touch scrolling makes the drag and the fling match:
 
 * Compatibility and tests
 
-While a window rests between columns, the blank prefix replaces any =line-prefix= text property, and a sliver up to one column wide at the left edge shows blank instead of part of a character.
+While a window rests between columns, a sliver up to one column wide at the left edge shows blank instead of part of a character. Lines with their own =line-prefix= text property get a shifted copy of it instead of the blank prefix; an =:align-to= stretch, as Dashboard uses to center lines, has its target moved.
 
 =touch-screen.el= has no public hook for touch scrolling. =fling-mode= advises its internal =touch-screen-handle-scroll=, =touch-screen-handle-touch=, and =touch-screen-handle-timeout=, as well as =pixel-scroll-precision-scroll-down-page= and =pixel-scroll-precision-scroll-up-page=, and reads and adjusts =touch-screen-current-tool= and =touch-screen-current-timer=. Check compatibility when upgrading Emacs. Disabling the mode removes the advice.
 

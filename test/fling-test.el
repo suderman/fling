@@ -154,6 +154,36 @@ Scrolls are summed into `down' and `up'."
         (should (zerop (fling--hscroll-offset)))
         (should-not (funcall prefix))))))
 
+(ert-deftest fling-hscroll-shifts-existing-line-prefixes ()
+  (with-temp-buffer
+    (insert "plain\n"
+            (propertize "centered\n" 'line-prefix
+                        (propertize " " 'display '(space :align-to (- center 4))))
+            (propertize "indented\n" 'line-prefix "  "))
+    (set-window-buffer nil (current-buffer))
+    (set-window-hscroll nil 0)
+    (cl-letf (((symbol-function 'frame-char-width) (lambda (&rest _) 10))
+              ((symbol-function 'fling--hscroll-limit) (lambda () 100)))
+      (fling--hscroll-pixels 23)
+      (let ((prefix-at (lambda (pos)
+                         (overlay-get
+                          (car (sort (seq-filter (lambda (o) (overlay-get o 'line-prefix))
+                                                 (overlays-at pos))
+                                     (lambda (a b) (> (or (overlay-get a 'priority) 0)
+                                                      (or (overlay-get b 'priority) 0)))))
+                          'line-prefix))))
+        (should (equal (funcall prefix-at 1) '(space :width (7))))
+        (should (equal (get-text-property 0 'display (funcall prefix-at 7))
+                       '(space :align-to (+ (- center 4) (7)))))
+        (should (equal (funcall prefix-at 16)
+                       (concat (propertize " " 'display '(space :width (7)))
+                               "  ")))
+        ;; The buffer's own prefixes are untouched.
+        (should (equal (get-text-property 7 'line-prefix)
+                       (propertize " " 'display '(space :align-to (- center 4)))))
+        (fling--hscroll-pixels 7)
+        (should-not (overlays-in (point-min) (point-max)))))))
+
 (ert-deftest fling-drag-scrolls-sideways-by-pixels-only-where-enabled ()
   (with-temp-buffer
     (insert (make-string 1000 ?x) "\n")
