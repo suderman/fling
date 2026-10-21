@@ -24,15 +24,16 @@
 ;; scrolls sideways, swipes and flings move by pixels instead: the window
 ;; scrolls one column too far and a blank `line-prefix' less than a column
 ;; wide pushes the text back.  Lines with their own `line-prefix' text
-;; property get a shifted copy of it, so centered text stays centered.  `pixel-scroll' cannot
-;; scroll vertically in a window scrolled sideways, so there the mode
-;; scrolls line by line itself.
+;; property get a shifted copy of it, so centered text stays centered.
+;; `pixel-scroll' cannot scroll vertically in a window scrolled sideways,
+;; so there the mode scrolls line by line itself.
+;;
 ;; Any input stops the fling, as does reaching either end of the buffer.
 ;; A touch that stops a fling only scrolls: holding it, tapping, or
-;; dragging from the region never selects text or moves point.  A long press
-;; also waits until Emacs has read any queued touch movement, so a stall
-;; cannot turn a swipe into a selection.
-;; Garbage collection waits until the fling ends.
+;; dragging from the region never selects text or moves point.  A long
+;; press also waits until Emacs has read any queued touch movement, so a
+;; stall cannot turn a swipe into a selection.  Garbage collection waits
+;; until the fling ends.
 ;;
 ;; The mode advises `touch-screen-handle-scroll', `touch-screen-handle-touch',
 ;; and `touch-screen-handle-timeout', internal to touch-screen.el, and the
@@ -104,7 +105,7 @@ HORIZONTAL the sideways speed, positive toward the ends of lines."
     (if (cdr samples)
         ;; The oldest sample's movement happened before its own timestamp.
         (/ (apply #'+ (mapcar axis (butlast samples)))
-           (- now (car (car (last samples)))))
+           (- now (caar (last samples))))
       0)))
 
 (defun fling--scroll-pixels (pixels)
@@ -120,8 +121,9 @@ fast fling covers in one slow frame."
         (setq pixels (- pixels move))))))
 
 (defun fling--hscroll-limit ()
-  "Return the horizontal scroll that brings the widest visible line's end
-to the right edge of the selected window."
+  "Return the hscroll that shows the end of the widest visible line.
+At that hscroll, the line's end sits at the right edge of the selected
+window."
   (let ((width 0)
         (end (window-end)))
     (save-excursion
@@ -220,6 +222,12 @@ widest visible line."
                                (cons hscroll (cons prefix (cons tick overlays)))))
     (= target (+ offset pixels))))
 
+(defun fling--drop-prefix (window)
+  "Remove WINDOW's prefix overlays, leaving it on a whole column."
+  (when-let* ((state (window-parameter window 'fling--hscroll)))
+    (mapc #'delete-overlay (cdddr state))
+    (set-window-parameter window 'fling--hscroll nil)))
+
 (defun fling--drop-stale-prefix (window)
   "Remove WINDOW's prefix overlays once something else scrolls it sideways.
 Other commands move whole columns and know nothing of the prefix."
@@ -227,8 +235,7 @@ Other commands move whole columns and know nothing of the prefix."
               ((or (not (eql (car state) (window-hscroll window)))
                    (not (eq (overlay-buffer (nth 3 state))
                             (window-buffer window))))))
-    (mapc #'delete-overlay (cdddr state))
-    (set-window-parameter window 'fling--hscroll nil)))
+    (fling--drop-prefix window)))
 
 (defun fling--prefix-overlays ()
   "Return overlays to shift the current buffer's lines in the selected window.
@@ -253,23 +260,26 @@ The first covers the buffer; each later one covers a run of a
   "Return line prefix PREFIX with its text pushed PIXELS right.
 Space before an `:align-to' stretch does not move what follows it, so
 move the stretch's target instead."
-  (let* ((string (if (stringp prefix) prefix (propertize " " 'display prefix)))
-         (spec (and prefix (get-text-property 0 'display string))))
-    (cond
-     ((null prefix) `(space :width (,pixels)))
-     ((and (eq (car-safe spec) 'space) (plist-get (cdr spec) :align-to))
-      (let ((shifted (copy-sequence string))
-            (end (next-single-property-change 0 'display string
-                                              (length string))))
-        (put-text-property
-         0 end 'display
-         `(space ,@(plist-put (copy-sequence (cdr spec)) :align-to
-                              `(+ ,(plist-get (cdr spec) :align-to)
-                                  (,pixels))))
-         shifted)
-        shifted))
-     (t (concat (propertize " " 'display `(space :width (,pixels)))
-                string)))))
+  (if (null prefix)
+      `(space :width (,pixels))
+    (let* ((string (if (stringp prefix)
+                       prefix
+                     (propertize " " 'display prefix)))
+           (spec (get-text-property 0 'display string))
+           (align-to (and (eq (car-safe spec) 'space)
+                          (plist-get (cdr spec) :align-to))))
+      (if (not align-to)
+          (concat (propertize " " 'display `(space :width (,pixels)))
+                  string)
+        (let ((shifted (copy-sequence string))
+              (end (next-single-property-change 0 'display string
+                                                (length string))))
+          (put-text-property
+           0 end 'display
+           `(space ,@(plist-put (copy-sequence (cdr spec)) :align-to
+                                `(+ ,align-to (,pixels))))
+           shifted)
+          shifted)))))
 
 (defun fling--drag (scroll dx dy)
   "Call SCROLL with DX and DY, scrolling sideways by pixels where enabled.
@@ -280,9 +290,12 @@ scroll sideways."
       (funcall scroll dx dy)
     (let ((touch-screen-enable-hscroll nil))
       (funcall scroll dx dy))
-    (when (or (> (or (nth 8 touch-screen-current-tool) 0) 0)
-              (< (or (nth 7 touch-screen-current-tool) 0) 1))
-      (fling--hscroll-pixels dx))))
+    ;; The same test touch-screen.el applies to the lines it has scrolled
+    ;; sideways and vertically during this swipe.
+    (let ((lines-vscrolled (or (nth 7 touch-screen-current-tool) 0))
+          (lines-hscrolled (or (nth 8 touch-screen-current-tool) 0)))
+      (when (or (> lines-hscrolled 0) (< lines-vscrolled 1))
+        (fling--hscroll-pixels dx)))))
 
 (defun fling-scroll (window velocity &optional hvelocity)
   "Keep scrolling WINDOW at VELOCITY pixels per second, slowing with friction.
@@ -305,13 +318,13 @@ stops the fling."
             (let* ((now (float-time))
                    (dt (- now last))
                    (decay (exp (- (/ dt fling-time-constant))))
-                   (distance (+ carry (* velocity dt)))
-                   (pixels (truncate distance))
-                   (hdistance (+ hcarry (* hvelocity dt)))
-                   (hpixels (truncate hdistance)))
+                   (travel (+ carry (* velocity dt)))
+                   (pixels (truncate travel))
+                   (htravel (+ hcarry (* hvelocity dt)))
+                   (hpixels (truncate htravel)))
               (setq last now
-                    carry (- distance pixels)
-                    hcarry (- hdistance hpixels)
+                    carry (- travel pixels)
+                    hcarry (- htravel hpixels)
                     velocity (* velocity decay)
                     hvelocity (* hvelocity decay))
               (when (and (/= hpixels 0)
@@ -410,6 +423,8 @@ movement that is already queued, turning a swipe into a selection."
     (advice-remove 'touch-screen-handle-touch #'fling--start)
     (advice-remove 'touch-screen-handle-touch #'fling--catch)
     (advice-remove 'touch-screen-handle-timeout #'fling--hold)
+    ;; Without the hook, nothing would remove a prefix left behind.
+    (walk-windows #'fling--drop-prefix t t)
     (setq fling--samples nil
           fling--hscroll-start nil
           fling--caught-at nil)))

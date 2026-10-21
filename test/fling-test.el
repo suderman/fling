@@ -2,6 +2,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'ert)
 (require 'fling)
 
@@ -157,6 +158,20 @@ Scrolls are summed into `down' and `up'."
         (should (zerop (fling--hscroll-offset)))
         (should-not (funcall prefix))))))
 
+(ert-deftest fling-mode-off-drops-a-left-over-prefix ()
+  (with-temp-buffer
+    (insert (make-string 1000 ?x) "\n")
+    (set-window-buffer nil (current-buffer))
+    (set-window-hscroll nil 0)
+    (cl-letf (((symbol-function 'frame-char-width) (lambda (&rest _) 10)))
+      (fling-mode 1)
+      (fling--hscroll-pixels 23)
+      (should (overlays-in (point-min) (point-max)))
+      (fling-mode -1)
+      (should-not (overlays-in (point-min) (point-max)))
+      (should-not (window-parameter nil 'fling--hscroll))
+      (should (= (window-hscroll) 3)))))
+
 (ert-deftest fling-hscroll-shifts-existing-line-prefixes ()
   (with-temp-buffer
     (insert "plain\n"
@@ -243,18 +258,18 @@ Scrolls are summed into `down' and `up'."
     (set-window-hscroll nil 5)
     (let ((line (line-pixel-height))
           (unscrolled nil))
-      (cl-letf (((symbol-function 'down) (lambda (_) (setq unscrolled t))))
-        (fling--vscroll-down #'down (* 3 line))
+      (let ((scroll (lambda (_) (setq unscrolled t))))
+        (fling--vscroll-down scroll (* 3 line))
         (should-not unscrolled)
         (should (= (line-number-at-pos (window-start)) 4))
         (should (>= (point) (window-start)))
-        (fling--vscroll-up #'down line)
+        (fling--vscroll-up scroll line)
         (should (= (line-number-at-pos (window-start)) 3))
-        (should-error (fling--vscroll-up #'down (* 10 line))
+        (should-error (fling--vscroll-up scroll (* 10 line))
                       :type 'beginning-of-buffer)
         (should (= (window-start) (point-min)))
         (set-window-hscroll nil 0)
-        (fling--vscroll-down #'down line)
+        (fling--vscroll-down scroll line)
         (should unscrolled)))))
 
 (ert-deftest fling-scroll-splits-steps-taller-than-the-window ()
