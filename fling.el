@@ -33,8 +33,10 @@
 ;;
 ;; `fling-mode' continues a released swipe instead.  The release speed comes
 ;; from the last tenth of a second only, so a pause before lifting does not
-;; fling.  A swipe that also scrolled the window sideways flings sideways
-;; too, so a diagonal swipe glides diagonally.  The speed decays
+;; fling.  It is measured by when each touch happened, not when Emacs read
+;; it, so touches that queue up behind a stall do not fling too fast.  A
+;; swipe that also scrolled the window sideways flings sideways too, so a
+;; diagonal swipe glides diagonally.  The speed decays
 ;; exponentially, and each step moves by speed times the real time since the
 ;; last frame, so a slow frame never slows the motion.
 ;;
@@ -95,6 +97,9 @@ Larger values glide further."
 (defvar fling--samples nil
   "Recent touch-scroll movements as (TIME DX . DY), newest first.")
 
+(defvar fling--event-time nil
+  "When the touch event being handled happened, in seconds, or nil if unknown.")
+
 (defvar fling--hscroll-start nil
   "The window and its sideways offset in pixels when the current swipe began.")
 
@@ -104,9 +109,19 @@ Larger values glide further."
                     (< (- now (car sample)) fling--sample-seconds))
                   fling--samples))
 
+(defun fling--note-time (event &rest _)
+  "Remember when touch EVENT happened, from its position's timestamp."
+  (let* ((point (if (eq (car event) 'touchscreen-update)
+                    (car (cadr event))
+                  (cadr event)))
+         (time (and (consp point) (posnp (cdr point))
+                    (posn-timestamp (cdr point)))))
+    (setq fling--event-time (and (natnump time) (> time 0) (/ time 1000.0)))))
+
 (defun fling--record (dx dy &optional now)
-  "Record touch movement DX and DY at NOW, defaulting to the current time."
-  (let ((now (or now (float-time))))
+  "Record touch movement DX and DY at NOW.
+NOW defaults to when the current touch event happened, else the current time."
+  (let ((now (or now fling--event-time (float-time))))
     (unless fling--hscroll-start
       (setq fling--hscroll-start
             (cons (selected-window) (fling--hscroll-offset))))
@@ -369,12 +384,12 @@ touch-screen.el may have ignored the swipe's horizontal movement."
              (eq (nth 3 touch-screen-current-tool) 'scroll)
              (not (caddr event)))
     (let* ((window (cadr touch-screen-current-tool))
-           (velocity (fling--velocity))
+           (velocity (fling--velocity fling--event-time))
            (hvelocity (if (and (eq (car fling--hscroll-start) window)
                                (window-live-p window)
                                (/= (fling--hscroll-offset window)
                                    (cdr fling--hscroll-start)))
-                          (fling--velocity nil t)
+                          (fling--velocity fling--event-time t)
                         0)))
       (setq fling--samples nil
             fling--hscroll-start nil)
@@ -429,6 +444,9 @@ movement that is already queued, turning a swipe into a selection."
         (advice-add 'pixel-scroll-precision-scroll-up-page :around
                     #'fling--vscroll-up)
         (advice-add 'touch-screen-handle-touch :before #'fling--start)
+        ;; Outermost, so the time is known before anything handles the event.
+        (advice-add 'touch-screen-handle-touch :before #'fling--note-time
+                    '((depth . -100)))
         (advice-add 'touch-screen-handle-touch :around #'fling--catch)
         (advice-add 'touch-screen-handle-timeout :around #'fling--hold))
     (advice-remove 'touch-screen-handle-scroll #'fling--record)
@@ -439,13 +457,15 @@ movement that is already queued, turning a swipe into a selection."
     (advice-remove 'pixel-scroll-precision-scroll-up-page
                    #'fling--vscroll-up)
     (advice-remove 'touch-screen-handle-touch #'fling--start)
+    (advice-remove 'touch-screen-handle-touch #'fling--note-time)
     (advice-remove 'touch-screen-handle-touch #'fling--catch)
     (advice-remove 'touch-screen-handle-timeout #'fling--hold)
     ;; Without the hook, nothing would remove a prefix left behind.
     (walk-windows #'fling--drop-prefix t t)
     (setq fling--samples nil
           fling--hscroll-start nil
-          fling--caught-at nil)))
+          fling--caught-at nil
+          fling--event-time nil)))
 
 (provide 'fling)
 ;;; fling.el ends here

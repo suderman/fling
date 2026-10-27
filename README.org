@@ -7,6 +7,7 @@ Emacs's own kinetic scrolling in =pixel-scroll= was built for touchpads. On a ph
 =fling= instead:
 
 - takes the release speed from the last tenth of a second, so a pause before lifting gives no fling;
+- times the swipe by when each touch happened, not when Emacs read it, so a swipe that queued up behind a stall does not fling too fast;
 - slows down exponentially, so a hard flick travels further than a gentle one;
 - glides sideways too when the swipe scrolled the window sideways, so a diagonal swipe glides diagonally, stopping at the start of lines or the end of the widest visible line;
 - scrolls sideways by pixels rather than whole columns wherever touch scrolls sideways, by scrolling one column too far and pushing the text back with a blank =line-prefix= narrower than a column;

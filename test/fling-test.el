@@ -49,6 +49,21 @@ Scrolls are summed into `down' and `up'."
   (fling-test--swipe 100.0 1 0.01 30)
   (should (zerop (fling--velocity 100.0))))
 
+(ert-deftest fling-velocity-uses-when-touches-happened ()
+  ;; Touches 10 ms apart that Emacs reads all at once after a stall.
+  (let ((fling--samples nil)
+        (fling--event-time nil)
+        (posn (list (selected-window) 1 '(0 . 0) 0
+                    nil 1 '(0 . 0) nil '(0 . 0) '(1 . 1))))
+    (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 500.0)))
+      (dotimes (i 20)
+        (setcar (nthcdr 3 posn) (+ 100000 (* 10 i)))
+        (fling--note-time `(touchscreen-update ((7 . ,posn))))
+        (fling--record 0 30))
+      (setcar (nthcdr 3 posn) 100190)
+      (fling--note-time `(touchscreen-end (7 . ,posn)))
+      (should (< (abs (- (fling--velocity fling--event-time) 3000)) 1)))))
+
 (ert-deftest fling-scroll-glides-speed-times-the-time-constant ()
   (with-temp-buffer
     (let ((fling-time-constant 0.35))
@@ -353,6 +368,7 @@ Scrolls are summed into `down' and `up'."
         (should (advice-member-p #'fling--vscroll-down
                                  'pixel-scroll-precision-scroll-down-page))
         (should (advice-member-p #'fling--start 'touch-screen-handle-touch))
+        (should (advice-member-p #'fling--note-time 'touch-screen-handle-touch))
         (should (advice-member-p #'fling--catch 'touch-screen-handle-touch))
         (should (advice-member-p #'fling--hold 'touch-screen-handle-timeout))
         (fling-mode -1)
@@ -361,6 +377,7 @@ Scrolls are summed into `down' and `up'."
         (should-not (advice-member-p #'fling--vscroll-down
                                      'pixel-scroll-precision-scroll-down-page))
         (should-not (advice-member-p #'fling--start 'touch-screen-handle-touch))
+        (should-not (advice-member-p #'fling--note-time 'touch-screen-handle-touch))
         (should-not (advice-member-p #'fling--catch 'touch-screen-handle-touch))
         (should-not (advice-member-p #'fling--hold 'touch-screen-handle-timeout)))
     (fling-mode -1)))
