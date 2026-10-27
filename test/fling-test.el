@@ -359,6 +359,36 @@ Scrolls are summed into `down' and `up'."
       (when touch-screen-current-timer
         (cancel-timer touch-screen-current-timer)))))
 
+(ert-deftest fling-defers-garbage-collection-until-idle ()
+  (let ((gc-cons-threshold 1000)
+        (fling--gc-saved nil)
+        (fling--gc-timer nil)
+        (collected 0))
+    (cl-letf (((symbol-function 'garbage-collect)
+               (lambda () (setq collected (1+ collected)))))
+      (unwind-protect
+          (progn
+            ;; Only the start of a touch defers.
+            (fling--defer-gc '(touchscreen-update ((7 . nil))))
+            (should (= gc-cons-threshold 1000))
+            (fling--defer-gc '(touchscreen-begin (7 . nil)))
+            (should (= gc-cons-threshold fling--gc-threshold))
+            (should (memq fling--gc-timer timer-idle-list))
+            ;; A later touch keeps the first saved threshold and timer.
+            (let ((timer fling--gc-timer))
+              (fling--defer-gc)
+              (should (eq fling--gc-timer timer)))
+            (fling--collect)
+            (should (= gc-cons-threshold 1000))
+            (should (= collected 1))
+            (should-not fling--gc-timer)
+            ;; Disabling the mode restores the threshold without collecting.
+            (fling--defer-gc)
+            (fling-mode -1)
+            (should (= gc-cons-threshold 1000))
+            (should (= collected 1)))
+        (fling--restore-gc)))))
+
 (ert-deftest fling-mode-adds-and-removes-its-advice ()
   (unwind-protect
       (progn
@@ -369,6 +399,7 @@ Scrolls are summed into `down' and `up'."
                                  'pixel-scroll-precision-scroll-down-page))
         (should (advice-member-p #'fling--start 'touch-screen-handle-touch))
         (should (advice-member-p #'fling--note-time 'touch-screen-handle-touch))
+        (should (advice-member-p #'fling--defer-gc 'touch-screen-handle-touch))
         (should (advice-member-p #'fling--catch 'touch-screen-handle-touch))
         (should (advice-member-p #'fling--hold 'touch-screen-handle-timeout))
         (fling-mode -1)
@@ -378,6 +409,7 @@ Scrolls are summed into `down' and `up'."
                                      'pixel-scroll-precision-scroll-down-page))
         (should-not (advice-member-p #'fling--start 'touch-screen-handle-touch))
         (should-not (advice-member-p #'fling--note-time 'touch-screen-handle-touch))
+        (should-not (advice-member-p #'fling--defer-gc 'touch-screen-handle-touch))
         (should-not (advice-member-p #'fling--catch 'touch-screen-handle-touch))
         (should-not (advice-member-p #'fling--hold 'touch-screen-handle-timeout)))
     (fling-mode -1)))

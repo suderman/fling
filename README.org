@@ -16,7 +16,7 @@ Emacs's own kinetic scrolling in =pixel-scroll= was built for touchpads. On a ph
 - stops on any input, and at either end of the buffer;
 - treats a touch that stops a fling as a scroll, so catching the text never selects a word, drags the region, or moves point;
 - delays a long press until Emacs has read any queued touch movement, so a stall cannot turn a swipe into a selection;
-- defers garbage collection until the fling ends, since a collection can pause a phone for a tenth of a second.
+- defers garbage collection from the first touch until Emacs has been idle for =fling-gc-idle-delay= seconds, since scrolling on a phone otherwise collects every few seconds and each collection stalls for a tenth of a second.
 
 * Install
 
@@ -52,6 +52,7 @@ Pixel-precise touch scrolling makes the drag and the fling match:
 
 - =fling-time-constant= (default 0.35) is the number of seconds for a fling to lose about two thirds of its speed. A fling travels about its release speed times this value. Raise it for longer glides.
 - =fling-min-velocity= (default 300) is the release speed, in pixels per second, below which a swipe does not fling.
+- =fling-gc-idle-delay= (default 2) is the number of idle seconds after touch scrolling before Emacs collects garbage. Until then, scrolling may allocate up to 1 GB before Emacs collects anyway.
 
 =fling-scroll= scrolls a window at a given speed and can be called directly.
 

@@ -52,8 +52,12 @@
 ;; A touch that stops a fling only scrolls: holding it, tapping, or
 ;; dragging from the region never selects text or moves point.  A long
 ;; press also waits until Emacs has read any queued touch movement, so a
-;; stall cannot turn a swipe into a selection.  Garbage collection waits
-;; until the fling ends.
+;; stall cannot turn a swipe into a selection.
+;;
+;; Scrolling allocates fast enough on a phone to collect garbage every few
+;; seconds, and each collection stalls for a tenth of a second.  From the
+;; first touch, collection waits until Emacs has been idle for
+;; `fling-gc-idle-delay' seconds, then runs once while nothing moves.
 ;;
 ;; The mode advises `touch-screen-handle-scroll', `touch-screen-handle-touch',
 ;; and `touch-screen-handle-timeout', internal to touch-screen.el, and the
@@ -79,6 +83,13 @@ Larger values glide further."
   "Release speed in pixels per second below which a swipe does not fling."
   :type 'number)
 
+(defcustom fling-gc-idle-delay 2
+  "Idle seconds after touch scrolling before collecting garbage."
+  :type 'number)
+
+(defconst fling--gc-threshold (* 1024 1024 1024)
+  "Bytes that touch scrolling may allocate before collecting anyway.")
+
 (defconst fling--sample-seconds 0.1
   "How much of the swipe before release sets the fling speed.")
 
@@ -100,6 +111,12 @@ Larger values glide further."
 (defvar fling--event-time nil
   "When the touch event being handled happened, in seconds, or nil if unknown.")
 
+(defvar fling--gc-saved nil
+  "The `gc-cons-threshold' to restore once idle, or nil when not deferred.")
+
+(defvar fling--gc-timer nil
+  "The idle timer that collects deferred garbage.")
+
 (defvar fling--hscroll-start nil
   "The window and its sideways offset in pixels when the current swipe began.")
 
@@ -117,6 +134,30 @@ Larger values glide further."
          (time (and (consp point) (posnp (cdr point))
                     (posn-timestamp (cdr point)))))
     (setq fling--event-time (and (natnump time) (> time 0) (/ time 1000.0)))))
+
+(defun fling--defer-gc (&optional event &rest _)
+  "Defer garbage collection from touch EVENT until Emacs is idle.
+Without EVENT, defer it from now.  Only the start of a touch counts."
+  (when (and (or (null event) (eq (car event) 'touchscreen-begin))
+             (not fling--gc-saved))
+    (setq fling--gc-saved gc-cons-threshold
+          gc-cons-threshold (max gc-cons-threshold fling--gc-threshold)
+          fling--gc-timer (run-with-idle-timer fling-gc-idle-delay nil
+                                               #'fling--collect))))
+
+(defun fling--restore-gc ()
+  "Restore the deferred garbage collection threshold."
+  (when fling--gc-timer
+    (cancel-timer fling--gc-timer))
+  (when fling--gc-saved
+    (setq gc-cons-threshold fling--gc-saved))
+  (setq fling--gc-saved nil
+        fling--gc-timer nil))
+
+(defun fling--collect ()
+  "Restore the threshold and collect the garbage deferred by touch scrolling."
+  (fling--restore-gc)
+  (garbage-collect))
 
 (defun fling--record (dx dy &optional now)
   "Record touch movement DX and DY at NOW.
@@ -335,13 +376,11 @@ scroll sideways."
 A positive VELOCITY scrolls toward the end of the buffer.  HVELOCITY scrolls
 sideways at the same time, positive toward the ends of lines.  Any input
 stops the fling."
+  (fling--defer-gc)
   (let ((last (float-time))
         (carry 0.0)
         (hvelocity (or hvelocity 0))
-        (hcarry 0.0)
-        ;; A collection can take a tenth of a second on a phone, long enough
-        ;; to make the fling jump.  Defer it until the fling stops.
-        (gc-cons-threshold most-positive-fixnum))
+        (hcarry 0.0))
     (with-selected-window window
       (condition-case nil
           (while (and (> (sqrt (+ (* velocity velocity)
@@ -447,6 +486,7 @@ movement that is already queued, turning a swipe into a selection."
         ;; Outermost, so the time is known before anything handles the event.
         (advice-add 'touch-screen-handle-touch :before #'fling--note-time
                     '((depth . -100)))
+        (advice-add 'touch-screen-handle-touch :before #'fling--defer-gc)
         (advice-add 'touch-screen-handle-touch :around #'fling--catch)
         (advice-add 'touch-screen-handle-timeout :around #'fling--hold))
     (advice-remove 'touch-screen-handle-scroll #'fling--record)
@@ -458,7 +498,9 @@ movement that is already queued, turning a swipe into a selection."
                    #'fling--vscroll-up)
     (advice-remove 'touch-screen-handle-touch #'fling--start)
     (advice-remove 'touch-screen-handle-touch #'fling--note-time)
+    (advice-remove 'touch-screen-handle-touch #'fling--defer-gc)
     (advice-remove 'touch-screen-handle-touch #'fling--catch)
+    (fling--restore-gc)
     (advice-remove 'touch-screen-handle-timeout #'fling--hold)
     ;; Without the hook, nothing would remove a prefix left behind.
     (walk-windows #'fling--drop-prefix t t)
